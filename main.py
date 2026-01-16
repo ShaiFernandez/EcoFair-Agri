@@ -12,7 +12,7 @@ from simulation import (
     Simulation,
 )
 from scenarios import SCENARIOS
-from metrics import extract_metrics
+from extract_metrics import extract_metrics
 
 
 def run_single(scenario_key: str = "S1", seed: int = 42):
@@ -67,4 +67,5 @@ def run_single(scenario_key: str = "S1", seed: int = 42):
 if __name__ == "__main__":
     # Test all 3 scenarios to verify the logic
     for s in ["S1", "S2", "S3"]:
+
         run_single(s, seed=42)
