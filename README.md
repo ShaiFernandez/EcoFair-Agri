@@ -1,5 +1,8 @@
 # EcoFair-Agri
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/Made%20with-Python-blue.svg)](https://www.python.org/)
+
 **EcoFair-Agri** is an agent-based simulation framework designed to evaluate the trade-offs between economic efficiency, environmental sustainability, and social fairness in agricultural supply chains.
 
 The project simulates a marketplace of agricultural suppliers (farmers) and buyers to analyze how different policy interventions—such as environmental taxation and fairness-aware algorithms—impact market inequality (Gini coefficient), resource usage (Water/Energy), food waste, and supply chain resilience.
