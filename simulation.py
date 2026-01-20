@@ -17,8 +17,13 @@ class Supplier:
     cap_nominal: float  # Nominal capacity Cap_s
     distances: Dict[str, float]  # Distance to buyer
 
-    # 2. Fields with Defaults (Must come AFTER required fields)
+    # 2. Fields with Defaults
     reputation: float = 1.0  # Historical Reputation (Rep_i)
+
+    # 3. Fields weather resilience
+    weather_susceptibility: float = 0.0  # 0.0 = Immune (Indoor), 1.0 = Vulnerable (Outdoor)
+    is_seasonal: bool = False  # Seasonality flag. True for Outdoor, False for Indoor
+    waste_generated: float = 0.0  # Spoilage Tracking. To track how much food rotted
 
     # Fairness state
     Q: float = 0.0  # cumulative allocated quantity Q_s
@@ -28,9 +33,34 @@ class Supplier:
     rot_wait: int = 0
     cap_available: float = 0.0
 
-    def reset_capacity(self):
-        self.cap_available = self.cap_nominal
+    def reset_capacity(self, t: int, weather_severity: float, T_total: int):
+        # 1. Weather Impact:
+        impact = self.weather_susceptibility * weather_severity
+        yield_factor = 1.0 - impact
 
+        # 2. Seasonality Impact:
+        # If seasonal (Outdoor), production drops to 10% during the last 20% of rounds (Winter)
+        if self.is_seasonal:
+            # Example: In a 100 round sim, Winter is rounds 80-100
+            winter_start = int(T_total * 0.8)
+            if t >= winter_start:
+                yield_factor *= 0.1  # Winter reduces yield by 90%
+
+        # Ensure yield doesn't go below 0
+        self.cap_available = self.cap_nominal * max(0.0, yield_factor)
+
+    def calculate_spoilage(self, buyer_id: str, quantity: float) -> float:
+        # Spoilage logic:
+        # 5% spoilage per 100km
+        dist = self.distances.get(buyer_id, 0.0)
+        spoilage_rate = (dist / 100.0) * 0.05
+
+        # Cap spoilage at 50% max
+        spoilage_rate = min(spoilage_rate, 0.5)
+
+        spoilage_amount = quantity * spoilage_rate
+        self.waste_generated += spoilage_amount
+        return spoilage_amount
 
 @dataclass
 class Buyer:
@@ -75,7 +105,6 @@ class ScenarioConfig:
     w_e: float = 0.0
     w_f: float = 0.0
 
-
 # =========================
 #  ENVIRONMENTAL DATA MODULE
 # =========================
@@ -93,9 +122,8 @@ class EnvironmentalDataModule:
     def get_co2(self, supplier, scenario):
         return 0.0
 
-    # =========================
 
-
+# =========================
 #  FAIRNESS MODULE
 # =========================
 
@@ -186,9 +214,9 @@ class PolicyScoringModule:
     def carbon_adjusted_cost(self, base_cost, co2):
         return base_cost
 
-    # =========================
 
 
+# =========================
 #  MARKETPLACE MODULE
 # =========================
 
@@ -229,7 +257,7 @@ class MarketplaceModule:
 
         for s in eligible_suppliers:
             share = scores[s.id] / total_score
-            q = share * buyer.demand_remaining
+            q = share * buyer.demand_nominal
             q = min(q, s.cap_available)
             allocations[(s.id, buyer.id)] = q
             s.cap_available -= q
@@ -288,15 +316,40 @@ class Simulation:
     def run(self):
         T = self.scenario.T
         buyer = self.buyers[0]
-        for t in range(1, T + 1):
-            self.marketplace.refresh_state(self.suppliers, self.buyers)
-            eligible = self.marketplace.filter_suppliers(self.suppliers)
 
+        # Weather Pattern: 10% chance of severe drought (severity=0.8)
+        # Otherwise normal fluctuation (severity=0.0 to 0.1)
+
+        for t in range(1, T + 1):
+            # Generate Weather
+            roll = random.random()
+
+            if roll < 0.10:
+                weather_severity = 0.8  # DROUGHT! (80% loss for outdoor)
+            else:
+                weather_severity = 0.0  # Normal weather
+
+            # Refresh capacity with Weather Impact
+            for s in self.suppliers:
+                # FIX: Pass current time 't' and total time 'T' (as T_total)
+                s.reset_capacity(t, weather_severity, T)
+
+            buyer.reset_demand()
+
+            eligible = self.marketplace.filter_suppliers(self.suppliers)
             if self.scenario.allocation_mode == "sequential":
                 ranked = self.marketplace.rank_suppliers(eligible, buyer)
                 allocations = self.marketplace.allocate_sequential(ranked, buyer)
             else:
                 allocations = self.marketplace.allocate_proportional(eligible, buyer)
+
+            # FIX: Spoilage calculation must happen regardless of allocation mode
+            # We unindent this block so it runs for both Sequential AND Proportional
+            for (sid, bid), q in allocations.items():
+                s = next(s for s in self.suppliers if s.id == sid)
+                waste = s.calculate_spoilage(bid, q)
+                # Note: The buyer pays for 'q', but receives 'q - waste'
+            # -------------------------------
 
             if self.scenario.use_fairness:
                 self.fairness.update_fairness(self.suppliers, allocations)
@@ -305,38 +358,34 @@ class Simulation:
             cost = self.marketplace.compute_cost_total(self.suppliers, allocations)
             self.logger.record(t, allocations, self.suppliers, emissions, cost)
 
-
 # =========================
 #  FARMER GENERATION
 # =========================
 
 def create_farmers_AB() -> List[Supplier]:
-    suppliers: List[Supplier] = []
+    suppliers = []
     buyer_ids = ["B1"]
 
-    # Type A: Indoor (High Cost, Low Water, High Energy)
+    # Type A: Indoor (Immune, Non-Seasonal, Close/Low Spoilage)
     for i in range(3):
         suppliers.append(Supplier(
-            id=f"Indoor_{i + 1}",
-            c=2.50,
-            water_footprint=10.0,
-            energy_footprint=5.0,
-            cap_nominal=100.0,
-            distances={b: 10.0 for b in buyer_ids}
+            id=f"Indoor_{i+1}",
+            c=2.50, water_footprint=10.0, energy_footprint=5.0, cap_nominal=100.0,
+            distances={b: 10.0 for b in buyer_ids}, # 10km = ~0.5% spoilage
+            weather_susceptibility=0.0,
+            is_seasonal=False # Produces year-round
         ))
 
-    # Type B: Outdoor (Low Cost, High Water, Low Energy)
+    # Type B: Outdoor (Vulnerable, Seasonal, Far/High Spoilage)
     for i in range(3):
         suppliers.append(Supplier(
-            id=f"Outdoor_{i + 1}",
-            c=1.50,
-            water_footprint=100.0,
-            energy_footprint=1.0,
-            cap_nominal=100.0,
-            distances={b: 200.0 for b in buyer_ids},
-            reputation=0.85  # Lower reliability
+            id=f"Outdoor_{i+1}",
+            c=1.50, water_footprint=100.0, energy_footprint=1.0, cap_nominal=100.0,
+            distances={b: 200.0 for b in buyer_ids}, # 200km = ~10% spoilage
+            weather_susceptibility=1.0,
+            is_seasonal=True, # Stops producing in winter
+            reputation=0.85
         ))
-
     return suppliers
 
 
